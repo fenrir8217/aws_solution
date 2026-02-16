@@ -1,0 +1,174 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  JAVA_VERSION: '17'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Test - Run unit and integration tests for each service
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [svc-a, svc-b, svc-c, svc-d]
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Run tests
+        run: mvn --batch-mode --no-transfer-progress verify
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.service }}
+          path: ${{ matrix.service }}/target/surefire-reports/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Build and Push - Build Docker images and push to ECR
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    name: Build & Push (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [svc-a, svc-b, svc-c, svc-d]
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Build application JAR
+        run: mvn --batch-mode --no-transfer-progress package -DskipTests
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract metadata for Docker
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          IMAGE_TAG="${SHORT_SHA}"
+          REPO="${{ env.ECR_REGISTRY }}/${{ matrix.service }}"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag ${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.image_tag }} \
+            --tag ${{ steps.meta.outputs.repo }}:latest \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            .
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.image_tag }}
+          docker push ${{ steps.meta.outputs.repo }}:latest
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Deploy - Update EKS deployments with new images
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy services to EKS
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          SERVICES=(svc-a svc-b svc-c svc-d)
+
+          for SERVICE in "${SERVICES[@]}"; do
+            IMAGE="${{ env.ECR_REGISTRY }}/${SERVICE}:${SHORT_SHA}"
+            echo "Deploying ${SERVICE} with image ${IMAGE}"
+
+            kubectl set image deployment/${SERVICE} \
+              ${SERVICE}=${IMAGE} \
+              --namespace=demo \
+              --record
+          done
+
+      - name: Wait for rollouts to complete
+        run: |
+          SERVICES=(svc-a svc-b svc-c svc-d)
+
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "Waiting for ${SERVICE} rollout..."
+            kubectl rollout status deployment/${SERVICE} \
+              --namespace=demo \
+              --timeout=300s
+          done
+
+      - name: Verify deployments
+        run: |
+          kubectl get deployments --namespace=demo -o wide
+          kubectl get pods --namespace=demo

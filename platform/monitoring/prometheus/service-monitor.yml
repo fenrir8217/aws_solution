@@ -1,0 +1,53 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: spring-boot-actuator
+  namespace: monitoring
+  labels:
+    app: kube-prometheus-stack
+    release: prometheus
+spec:
+  # Discover services in the microservices namespace
+  namespaceSelector:
+    matchNames:
+      - microservices
+
+  # Match services with these labels
+  selector:
+    matchLabels:
+      monitoring: "true"
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - svc-a
+          - svc-b
+          - svc-c
+          - svc-d
+
+  # Endpoint configuration for Spring Boot Actuator
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s
+      scrapeTimeout: 10s
+      honorLabels: true
+      metricRelabelings:
+        # Drop high-cardinality metrics if needed
+        - sourceLabels: [__name__]
+          regex: "jvm_gc_pause_seconds.*"
+          action: drop
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app]
+          targetLabel: app
+        - sourceLabels: [__meta_kubernetes_pod_label_version]
+          targetLabel: version
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+
+  # Target labels from the discovered service
+  targetLabels:
+    - app
+    - version

@@ -1,0 +1,105 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: microservices-alerts
+  namespace: monitoring
+  labels:
+    app: kube-prometheus-stack
+    release: prometheus
+spec:
+  groups:
+    - name: microservices.infrastructure
+      rules:
+        # HighCpuUsage - Pod CPU usage exceeds 80% for 5 minutes
+        - alert: HighCpuUsage
+          expr: |
+            (
+              sum(rate(container_cpu_usage_seconds_total{namespace="microservices", container!=""}[5m])) by (pod, namespace)
+              /
+              sum(kube_pod_container_resource_limits{namespace="microservices", resource="cpu"}) by (pod, namespace)
+            ) * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High CPU usage detected on pod {{ $labels.pod }}"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been using more than 80% CPU for over 5 minutes. Current value: {{ $value | printf \"%.1f\" }}%."
+            runbook_url: "https://wiki.internal/runbooks/high-cpu-usage"
+
+        # HighMemoryUsage - Pod memory usage exceeds 85% for 5 minutes
+        - alert: HighMemoryUsage
+          expr: |
+            (
+              sum(container_memory_working_set_bytes{namespace="microservices", container!=""}) by (pod, namespace)
+              /
+              sum(kube_pod_container_resource_limits{namespace="microservices", resource="memory"}) by (pod, namespace)
+            ) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High memory usage detected on pod {{ $labels.pod }}"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been using more than 85% memory for over 5 minutes. Current value: {{ $value | printf \"%.1f\" }}%."
+            runbook_url: "https://wiki.internal/runbooks/high-memory-usage"
+
+        # PodCrashLooping - Pod is restarting frequently
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="microservices"}[1h]) > 3
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Pod {{ $labels.pod }} is crash looping"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted {{ $value | printf \"%.0f\" }} times in the last hour."
+            runbook_url: "https://wiki.internal/runbooks/pod-crash-looping"
+
+        # ServiceDown - Target is down for more than 1 minute
+        - alert: ServiceDown
+          expr: |
+            up{job=~"svc-(a|b|c|d)"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Service {{ $labels.job }} is down"
+            description: "The Prometheus target {{ $labels.instance }} for job {{ $labels.job }} has been down for more than 1 minute."
+            runbook_url: "https://wiki.internal/runbooks/service-down"
+
+    - name: microservices.application
+      rules:
+        # HighErrorRate - HTTP 5xx error rate exceeds 5% for 5 minutes
+        - alert: HighErrorRate
+          expr: |
+            (
+              sum(rate(http_server_requests_seconds_count{namespace="microservices", status=~"5.."}[5m])) by (app, namespace)
+              /
+              sum(rate(http_server_requests_seconds_count{namespace="microservices"}[5m])) by (app, namespace)
+            ) * 100 > 5
+          for: 5m
+          labels:
+            severity: critical
+            team: backend
+          annotations:
+            summary: "High HTTP 5xx error rate for {{ $labels.app }}"
+            description: "Service {{ $labels.app }} in namespace {{ $labels.namespace }} has a 5xx error rate above 5% for the last 5 minutes. Current error rate: {{ $value | printf \"%.2f\" }}%."
+            runbook_url: "https://wiki.internal/runbooks/high-error-rate"
+
+        # HighLatency - p99 latency exceeds 2 seconds for 5 minutes
+        - alert: HighLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_server_requests_seconds_bucket{namespace="microservices"}[5m])) by (le, app, namespace)
+            ) > 2
+          for: 5m
+          labels:
+            severity: warning
+            team: backend
+          annotations:
+            summary: "High p99 latency for {{ $labels.app }}"
+            description: "Service {{ $labels.app }} in namespace {{ $labels.namespace }} has a p99 latency above 2 seconds for the last 5 minutes. Current p99: {{ $value | printf \"%.2f\" }}s."
+            runbook_url: "https://wiki.internal/runbooks/high-latency"

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-config
+  namespace: microservices
+  labels:
+    app: shared-config
+    managed-by: kubectl
+data:
+  DB_HOST: "postgres.microservices.svc.cluster.local"
+  REDIS_HOST: "redis.microservices.svc.cluster.local"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-0.kafka.microservices.svc.cluster.local:9092,kafka-1.kafka.microservices.svc.cluster.local:9092,kafka-2.kafka.microservices.svc.cluster.local:9092"

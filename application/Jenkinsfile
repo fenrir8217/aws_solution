@@ -1,0 +1,214 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION      = 'us-east-1'
+        ECR_REGISTRY    = credentials('ecr-registry')
+        EKS_CLUSTER     = credentials('eks-cluster-name')
+        AWS_CREDENTIALS = credentials('aws-credentials')
+        JAVA_VERSION    = '17'
+        SHORT_SHA       = sh(script: "git rev-parse --short=7 HEAD", returnStdout: true).trim()
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    tools {
+        maven 'Maven-3.9'
+        jdk   "JDK-${env.JAVA_VERSION}"
+    }
+
+    stages {
+        // =====================================================================
+        // Stage 1: Build - Compile all services in parallel
+        // =====================================================================
+        stage('Build') {
+            parallel {
+                stage('Build svc-a') {
+                    steps {
+                        dir('svc-a') {
+                            sh 'mvn --batch-mode --no-transfer-progress clean package -DskipTests'
+                        }
+                    }
+                }
+                stage('Build svc-b') {
+                    steps {
+                        dir('svc-b') {
+                            sh 'mvn --batch-mode --no-transfer-progress clean package -DskipTests'
+                        }
+                    }
+                }
+                stage('Build svc-c') {
+                    steps {
+                        dir('svc-c') {
+                            sh 'mvn --batch-mode --no-transfer-progress clean package -DskipTests'
+                        }
+                    }
+                }
+                stage('Build svc-d') {
+                    steps {
+                        dir('svc-d') {
+                            sh 'mvn --batch-mode --no-transfer-progress clean package -DskipTests'
+                        }
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // Stage 2: Test - Run tests for all services in parallel
+        // =====================================================================
+        stage('Test') {
+            parallel {
+                stage('Test svc-a') {
+                    steps {
+                        dir('svc-a') {
+                            sh 'mvn --batch-mode --no-transfer-progress verify'
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'svc-a/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Test svc-b') {
+                    steps {
+                        dir('svc-b') {
+                            sh 'mvn --batch-mode --no-transfer-progress verify'
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'svc-b/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Test svc-c') {
+                    steps {
+                        dir('svc-c') {
+                            sh 'mvn --batch-mode --no-transfer-progress verify'
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'svc-c/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+                stage('Test svc-d') {
+                    steps {
+                        dir('svc-d') {
+                            sh 'mvn --batch-mode --no-transfer-progress verify'
+                        }
+                    }
+                    post {
+                        always {
+                            junit 'svc-d/target/surefire-reports/*.xml'
+                        }
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // Stage 3: Docker Build & Push - Build images and push to ECR
+        // =====================================================================
+        stage('Docker Build & Push') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Login to AWS ECR
+                    sh """
+                        aws ecr get-login-password \
+                            --region ${AWS_REGION} \
+                        | docker login \
+                            --username AWS \
+                            --password-stdin ${ECR_REGISTRY}
+                    """
+
+                    def services = ['svc-a', 'svc-b', 'svc-c', 'svc-d']
+                    def parallelBuilds = [:]
+
+                    services.each { svc ->
+                        parallelBuilds[svc] = {
+                            dir(svc) {
+                                def image = "${ECR_REGISTRY}/${svc}"
+                                sh """
+                                    docker build \
+                                        --tag ${image}:${SHORT_SHA} \
+                                        --tag ${image}:latest \
+                                        .
+                                    docker push ${image}:${SHORT_SHA}
+                                    docker push ${image}:latest
+                                """
+                            }
+                        }
+                    }
+
+                    parallel parallelBuilds
+                }
+            }
+        }
+
+        // =====================================================================
+        // Stage 4: Deploy - Update EKS deployments
+        // =====================================================================
+        stage('Deploy') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Configure kubectl for EKS
+                    sh """
+                        aws eks update-kubeconfig \
+                            --name ${EKS_CLUSTER} \
+                            --region ${AWS_REGION}
+                    """
+
+                    def services = ['svc-a', 'svc-b', 'svc-c', 'svc-d']
+
+                    services.each { svc ->
+                        def image = "${ECR_REGISTRY}/${svc}:${SHORT_SHA}"
+                        sh """
+                            echo "Deploying ${svc} with image ${image}"
+                            kubectl set image deployment/${svc} \
+                                ${svc}=${image} \
+                                --namespace=demo \
+                                --record
+                        """
+                    }
+
+                    // Wait for all rollouts
+                    services.each { svc ->
+                        sh """
+                            echo "Waiting for ${svc} rollout..."
+                            kubectl rollout status deployment/${svc} \
+                                --namespace=demo \
+                                --timeout=300s
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully.'
+        }
+        failure {
+            echo 'Pipeline failed. Check stage logs for details.'
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

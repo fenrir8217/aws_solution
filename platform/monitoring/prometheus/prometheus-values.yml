@@ -1,0 +1,129 @@
+# Helm values for kube-prometheus-stack
+# Install: helm install prometheus prometheus-community/kube-prometheus-stack -f prometheus-values.yml -n monitoring
+
+prometheus:
+  prometheusSpec:
+    # Data retention
+    retention: 15d
+
+    # Persistent storage
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 50Gi
+
+    # Select all ServiceMonitors across namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector:
+      matchNames:
+        - microservices
+        - monitoring
+
+    # Select all PrometheusRules across namespaces
+    ruleSelectorNilUsesHelmValues: false
+    ruleNamespaceSelector:
+      matchNames:
+        - microservices
+        - monitoring
+
+    # Additional scrape configs for Spring Boot actuator endpoints
+    additionalScrapeConfigs:
+      - job_name: "spring-boot-actuator"
+        metrics_path: /actuator/prometheus
+        scrape_interval: 15s
+        scrape_timeout: 10s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - microservices
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: svc-(a|b|c|d)
+            action: keep
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+          - source_labels: [__meta_kubernetes_pod_label_version]
+            target_label: version
+
+      - job_name: "svc-a"
+        metrics_path: /actuator/prometheus
+        scrape_interval: 15s
+        static_configs:
+          - targets:
+              - svc-a.microservices.svc.cluster.local:8080
+            labels:
+              app: svc-a
+              namespace: microservices
+
+      - job_name: "svc-b"
+        metrics_path: /actuator/prometheus
+        scrape_interval: 15s
+        static_configs:
+          - targets:
+              - svc-b.microservices.svc.cluster.local:8081
+            labels:
+              app: svc-b
+              namespace: microservices
+
+      - job_name: "svc-c"
+        metrics_path: /actuator/prometheus
+        scrape_interval: 15s
+        static_configs:
+          - targets:
+              - svc-c.microservices.svc.cluster.local:8082
+            labels:
+              app: svc-c
+              namespace: microservices
+
+      - job_name: "svc-d"
+        metrics_path: /actuator/prometheus
+        scrape_interval: 15s
+        static_configs:
+          - targets:
+              - svc-d.microservices.svc.cluster.local:8083
+            labels:
+              app: svc-d
+              namespace: microservices
+
+  # Resource limits
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+# Alertmanager configuration
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+
+# Grafana is deployed separately
+grafana:
+  enabled: false
+
+# Node exporter for host-level metrics
+nodeExporter:
+  enabled: true
+
+# kube-state-metrics for Kubernetes object metrics
+kubeStateMetrics:
+  enabled: true
